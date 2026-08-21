@@ -1061,6 +1061,12 @@ void settings_apply(bool read_disk)
     dsp_set_crossfeed_cross_params(global_settings.crossfeed_cross_gain,
                                    global_settings.crossfeed_hf_attenuation,
                                    global_settings.crossfeed_hf_cutoff);
+    dsp_set_lofi_bitdepth(global_settings.lofi_bitdepth);
+    dsp_set_lofi_downsample(global_settings.lofi_downsample);
+    dsp_set_vinyl_crackle(global_settings.vinyl_crackle);
+    dsp_set_vinyl_compression(global_settings.vinyl_compression);
+    dsp_set_vinyl_flutter(global_settings.vinyl_flutter);
+    dsp_set_vinyl_mode(global_settings.vinyl_mode);
 
     /* Configure software equalizer, hardware eq is handled in audio_init() */
     dsp_eq_enable(global_settings.eq_enabled);

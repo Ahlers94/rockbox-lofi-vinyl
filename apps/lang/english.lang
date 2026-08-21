@@ -891,6 +891,118 @@
   </voice>
 </phrase>
 <phrase>
+  id: LANG_LOFI_BITDEPTH
+  desc: in lofi/bitcrush settings
+  user: core
+  <source>
+    *: "Bit Depth"
+  </source>
+  <dest>
+    *: "Bit Depth"
+  </dest>
+  <voice>
+    *: "Bit depth"
+  </voice>
+</phrase>
+<phrase>
+  id: LANG_LOFI_DOWNSAMPLE
+  desc: in lofi/bitcrush settings
+  user: core
+  <source>
+    *: "Downsample"
+  </source>
+  <dest>
+    *: "Downsample"
+  </dest>
+  <voice>
+    *: "Downsample"
+  </voice>
+</phrase>
+<phrase>
+  id: LANG_VINYL_CRACKLE
+  desc: in vinyl sim settings
+  user: core
+  <source>
+    *: "Crackle"
+  </source>
+  <dest>
+    *: "Crackle"
+  </dest>
+  <voice>
+    *: "Crackle"
+  </voice>
+</phrase>
+<phrase>
+  id: LANG_VINYL_COMPRESSION
+  desc: in vinyl sim settings
+  user: core
+  <source>
+    *: "Compression"
+  </source>
+  <dest>
+    *: "Compression"
+  </dest>
+  <voice>
+    *: "Compression"
+  </voice>
+</phrase>
+<phrase>
+  id: LANG_VINYL_FLUTTER
+  desc: in vinyl sim settings
+  user: core
+  <source>
+    *: "Flutter"
+  </source>
+  <dest>
+    *: "Flutter"
+  </dest>
+  <voice>
+    *: "Flutter"
+  </voice>
+</phrase>
+<phrase>
+  id: LANG_VINYL_MODE
+  desc: in vinyl sim settings
+  user: core
+  <source>
+    *: "Mode"
+  </source>
+  <dest>
+    *: "Mode"
+  </dest>
+  <voice>
+    *: "Mode"
+  </voice>
+</phrase>
+<phrase>
+  id: LANG_VINYL_MODE_VINYL
+  desc: in vinyl sim settings
+  user: core
+  <source>
+    *: "Vinyl"
+  </source>
+  <dest>
+    *: "Vinyl"
+  </dest>
+  <voice>
+    *: "Vinyl"
+  </voice>
+</phrase>
+<phrase>
+  id: LANG_VINYL_MODE_TAPE
+  desc: in vinyl sim settings
+  user: core
+  <source>
+    *: "Tape"
+  </source>
+  <dest>
+    *: "Tape"
+  </dest>
+  <voice>
+    *: "Tape"
+  </voice>
+</phrase>
+<phrase>
   id: LANG_CROSSFEED_CROSS_GAIN
   desc: in crossfeed settings
   user: core

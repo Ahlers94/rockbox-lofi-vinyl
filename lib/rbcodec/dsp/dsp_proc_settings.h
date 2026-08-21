@@ -26,6 +26,8 @@
 #include "crossfeed.h"
 #include "dsp_misc.h"
 #include "eq.h"
+#include "lofi.h"
+#include "vinyl.h"
 #include "pga.h"
 #include "surround.h"
 #include "afr.h"

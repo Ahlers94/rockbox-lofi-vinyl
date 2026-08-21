@@ -50,6 +50,8 @@ DSP_PROC_DB_START
     DSP_PROC_DB_ITEM(SURROUND)      /* haas surround */
     DSP_PROC_DB_ITEM(CHANNEL_MODE)  /* channel modes */
     DSP_PROC_DB_ITEM(COMPRESSOR)    /* dynamic-range compressor */
+    DSP_PROC_DB_ITEM(LOFI)          /* bitcrush / downsample */
+    DSP_PROC_DB_ITEM(VINYL)         /* vinyl/tape sim: crackle, compression, flutter */
 DSP_PROC_DB_STOP
 
 /* This file is included multiple times with different macro definitions so

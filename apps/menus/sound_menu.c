@@ -152,6 +152,12 @@ MENUITEM_SETTING(power_mode, &global_settings.power_mode, NULL);
                      &global_settings.crossfeed_hf_attenuation, lowlatency_callback);
     MENUITEM_SETTING(crossfeed_hf_cutoff,
                      &global_settings.crossfeed_hf_cutoff, lowlatency_callback);
+    MENUITEM_SETTING(lofi_bitdepth, &global_settings.lofi_bitdepth, lowlatency_callback);
+    MENUITEM_SETTING(lofi_downsample, &global_settings.lofi_downsample, lowlatency_callback);
+    MENUITEM_SETTING(vinyl_crackle, &global_settings.vinyl_crackle, lowlatency_callback);
+    MENUITEM_SETTING(vinyl_compression, &global_settings.vinyl_compression, lowlatency_callback);
+    MENUITEM_SETTING(vinyl_flutter, &global_settings.vinyl_flutter, lowlatency_callback);
+    MENUITEM_SETTING(vinyl_mode, &global_settings.vinyl_mode, lowlatency_callback);
     MAKE_MENU(crossfeed_menu,ID2P(LANG_CROSSFEED), NULL, Icon_NOICON,
               &crossfeed, &crossfeed_direct_gain, &crossfeed_cross_gain,
               &crossfeed_hf_attenuation, &crossfeed_hf_cutoff);
@@ -250,6 +256,8 @@ MAKE_MENU(sound_settings, ID2P(LANG_SOUND_SETTINGS), NULL, Icon_Audio,
           ,&audiohw_eq_tone_controls
 #endif
           ,&balance,&channel_config,&stereo_width
+          ,&lofi_bitdepth,&lofi_downsample
+          ,&vinyl_crackle,&vinyl_compression,&vinyl_flutter,&vinyl_mode
 #ifdef AUDIOHW_HAVE_DEPTH_3D
           ,&depth_3d
 #endif

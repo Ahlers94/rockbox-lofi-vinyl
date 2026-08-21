@@ -367,6 +367,12 @@ struct user_settings
     int balance;    /* stereo balance: -100 - +100 -100=left  0=bal +100=right  */
     int bass;       /* bass boost/cut in decibels                               */
     int treble;     /* treble boost/cut in decibels                             */
+    int lofi_bitdepth;
+    int lofi_downsample;
+    int vinyl_crackle;      /* knob 2: crackle/hiss amount, 0-100 */
+    int vinyl_compression;  /* knob 1: compression amount, 0-100 (stub) */
+    int vinyl_flutter;      /* knob 3: flutter/warble amount, 0-100 (stub) */
+    int vinyl_mode;         /* 0=Vinyl (pops+hiss+compression), 1=Tape (hiss+saturation) */
     int channel_config; /* Stereo, Mono, Custom, Mono left, Mono right, Karaoke */
     int stereo_width; /* 0-255% */
 
