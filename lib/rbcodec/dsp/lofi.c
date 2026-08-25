@@ -9,7 +9,7 @@ static int lofi_bitdepth   = LOFI_BITDEPTH_MAX;
 static int lofi_downsample = LOFI_DOWNSAMPLE_MIN;
 
 static int32_t held_sample[2];
-static int     hold_counter = 0;
+static int     hold_counter[2] = {0, 0};   /* now per-channel */
 
 static int shift_amount      = 0;
 static int current_frac_bits = 0;
@@ -35,40 +35,52 @@ void dsp_set_lofi_downsample(int factor)
     if (factor < LOFI_DOWNSAMPLE_MIN) factor = LOFI_DOWNSAMPLE_MIN;
     if (factor > LOFI_DOWNSAMPLE_MAX) factor = LOFI_DOWNSAMPLE_MAX;
     lofi_downsample = factor;
-    if (hold_counter > lofi_downsample)
-        hold_counter = lofi_downsample;
+
+    /* Clamp both channels' counters so a shrinking factor can't leave
+     * a channel holding for longer than the new period allows. */
+    for (int ch = 0; ch < 2; ch++)
+    {
+        if (hold_counter[ch] > lofi_downsample)
+            hold_counter[ch] = lofi_downsample;
+    }
+
     dsp_proc_enable(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_LOFI, true);
     dsp_proc_activate(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_LOFI, true);
 }
 
 static void lofi_flush(void)
 {
-    hold_counter   = 0;
-    held_sample[0] = 0;
-    held_sample[1] = 0;
+    hold_counter[0] = 0;
+    hold_counter[1] = 0;
+    held_sample[0]  = 0;
+    held_sample[1]  = 0;
 }
 
+/* Samples-outer / channels-inner, matching vinyl.c's structure, so that
+ * both channels advance through the same sample tick together. Each
+ * channel keeps its own hold_counter, so L and R sample-and-hold on
+ * identical schedules -- no inter-channel drift/smear. */
 static void lofi_process(struct dsp_proc_entry *this, struct dsp_buffer **buf_p)
 {
     struct dsp_buffer *buf = *buf_p;
     int channels = buf->format.num_channels;
     int count    = buf->remcount;
 
-    for (int ch = 0; ch < channels; ch++)
+    for (int i = 0; i < count; i++)
     {
-        int32_t *data = buf->p32[ch];
-
-        for (int i = 0; i < count; i++)
+        for (int ch = 0; ch < channels; ch++)
         {
-            if (hold_counter <= 0)
+            int32_t *data = buf->p32[ch];
+
+            if (hold_counter[ch] <= 0)
             {
                 held_sample[ch] = data[i];
-                hold_counter = lofi_downsample - 1;
+                hold_counter[ch] = lofi_downsample - 1;
             }
             else
             {
                 data[i] = held_sample[ch];
-                hold_counter--;
+                hold_counter[ch]--;
             }
 
             if (shift_amount > 0)
