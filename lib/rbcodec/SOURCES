@@ -7,6 +7,7 @@ dsp/compressor.c
 dsp/crossfeed.c
 dsp/lofi.c
 dsp/vinyl.c
+dsp/syncdelay.c
 dsp/dsp_core.c
 dsp/pbe.c
 dsp/afr.c
