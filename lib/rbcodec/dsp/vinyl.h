@@ -1,18 +1,19 @@
 #ifndef _VINYL_H
 #define _VINYL_H
-/* Each knob is 0 (off) plus a small number of hand-tuned intensity
- * steps, sized so every step on a one-way scrolling quick-menu is
- * audibly distinct -- no dead clicks. Ranges are per-knob now rather
- * than a single shared 0-100 "amount" scale, since each effect's
- * underlying math supports a different number of meaningful steps. */
+/* Compact ranges for a one-way scrolling quick-menu -- every step is
+ * meant to be reachable and distinct. The underlying DSP math in
+ * vinyl.c is UNCHANGED from the original 0-100 version; each knob
+ * value here is rescaled back up to that same 0-100 domain before the
+ * original formulas run, so the sound at any given knob position
+ * matches the same proportional position on the old 0-100 scale. */
 #define VINYL_CRACKLE_MIN     0
-#define VINYL_CRACKLE_MAX     16   /* 0=off, 1-16 = table index 0-15 */
+#define VINYL_CRACKLE_MAX     16
 
 #define VINYL_COMPRESSION_MIN 0
-#define VINYL_COMPRESSION_MAX 10   /* 0=off, 1-10 = table index 0-9 */
+#define VINYL_COMPRESSION_MAX 10
 
 #define VINYL_FLUTTER_MIN     0
-#define VINYL_FLUTTER_MAX     10   /* 0=off, 1-10 = table index 0-9 */
+#define VINYL_FLUTTER_MAX     10
 
 void dsp_set_vinyl_crackle(int amount);      /* Knob 2 */
 void dsp_set_vinyl_compression(int amount);  /* Knob 1 */
