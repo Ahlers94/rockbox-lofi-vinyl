@@ -2,280 +2,320 @@
 #include "dsp_misc.h"
 #include "dsp_proc_entry.h"
 #include "dsp_filter.h"
-#include "lofi.h"
+#include "vinyl.h"
 #include <string.h>
 
-static int lofi_bitdepth   = LOFI_BITDEPTH_MAX;
-static int lofi_downsample = LOFI_DOWNSAMPLE_MIN;
+static int vinyl_crackle     = 0;
+static int vinyl_compression = 0;
+static int vinyl_flutter     = 0;
+static int vinyl_mode        = 0;  /* 0=Vinyl, 1=Tape */
 
-static int32_t held_sample[2];
-static int     hold_counter[2] = {0, 0};   /* per-channel */
-
-static int shift_amount      = 0;
 static int current_frac_bits = 0;
+static int current_frequency = 44100;
 
-/* ---------------------------------------------------------------------
- * Asymmetric soft clip (input-stage saturation emulation)
- *
- * Real analog front ends don't clip the positive and negative halves of
- * a waveform identically -- op-amp bias and transistor asymmetry mean
- * one direction saturates a bit harder than the other. Modeled here as
- * two independent soft-knee thresholds/ratios rather than a DC offset,
- * so the average stays at zero (no DC injected into the signal) while
- * the *character* of positive vs. negative squashing differs.
- *
- * Thresholds are derived from frac_bits so they scale with the sample
- * format rather than being hardcoded to one bit width. Starting points
- * only -- nudge PCT/SHIFT values by ear.
- * ------------------------------------------------------------------- */
-static int32_t clip_pos_threshold = 0;
-static int32_t clip_neg_threshold = 0;
+static uint32_t noise_state = 0x12345678;
 
-#define CLIP_POS_KNEE_SHIFT 2   /* harder knee on positive excursions */
-#define CLIP_NEG_KNEE_SHIFT 4   /* softer knee on negative excursions */
-
-static void recompute_clip_thresholds(void)
+static inline uint32_t next_noise(void)
 {
-    /* Same "shift relative to frac_bits" idiom vinyl.c uses for its
-     * compression threshold, so full_scale tracks the current sample
-     * format instead of assuming a fixed bit width. */
-    int base_shift = (38 - current_frac_bits) + 3;
-    if (base_shift < 2)  base_shift = 2;
-    if (base_shift > 30) base_shift = 30;
-    int32_t full_scale = (int32_t)1 << (32 - base_shift);
-
-    clip_pos_threshold = (full_scale * 3)  >> 2;   /* ~75% */
-    clip_neg_threshold = (full_scale * 13) >> 4;   /* ~81% -- clips a bit later */
-}
-
-static inline int32_t asym_soft_clip(int32_t x)
-{
-    if (x >= 0)
-    {
-        if (x > clip_pos_threshold)
-        {
-            int32_t excess = x - clip_pos_threshold;
-            x = clip_pos_threshold + (excess >> CLIP_POS_KNEE_SHIFT);
-        }
-    }
-    else
-    {
-        int32_t mag = -x;
-        if (mag > clip_neg_threshold)
-        {
-            int32_t excess = mag - clip_neg_threshold;
-            mag = clip_neg_threshold + (excess >> CLIP_NEG_KNEE_SHIFT);
-        }
-        x = -mag;
-    }
-    return x;
-}
-
-/* ---------------------------------------------------------------------
- * Quantization-step-scaled dither noise (converter noise-floor emulation)
- *
- * Own independent PRNG/seed -- deliberately NOT shared with vinyl.c's
- * noise_state, so the two noise sources don't correlate (shared state
- * would make ADC-noise and vinyl-hiss share sign flips/timing and sound
- * like one noise source with a strange envelope instead of two
- * independent ones).
- *
- * Applied only at capture time, before truncation, sized to exactly one
- * quantization step (1 << shift_amount) so it dithers the truncation
- * itself and scales automatically with bit depth -- lower bitdepth
- * settings get proportionally coarser (louder) noise, matching how
- * real converter noise floor tracks quantization step size.
- * ------------------------------------------------------------------- */
-static uint32_t lofi_noise_state = 0x9E3779B9;
-
-static inline uint32_t next_lofi_noise(void)
-{
-    uint32_t x = lofi_noise_state;
+    uint32_t x = noise_state;
     x ^= x << 13;
     x ^= x >> 17;
     x ^= x << 5;
-    lofi_noise_state = x;
+    noise_state = x;
     return x;
 }
 
-static void recompute_shift(void)
+static int32_t lp_state[2] = {0, 0};
+static int32_t pop_amp  = 0;
+static int     pop_wait = 0;
+static int32_t comp_envelope = 0;  /* Vinyl mode: slow loudness tracker, S.frac_bits */
+
+#define FLUTTER_BUF_SIZE 512
+static int32_t flutter_buf[2][FLUTTER_BUF_SIZE];
+static int     flutter_write_pos = 0;
+static uint32_t flutter_phase = 0;      /* LFO phase accumulator */
+static uint32_t flutter_jitter_state = 0xA5A5A5A5;
+
+void dsp_set_vinyl_crackle(int amount)
 {
-    int reduction = current_frac_bits - lofi_bitdepth;
-    shift_amount = (reduction < 0) ? 0 : reduction;
+    if (amount < VINYL_CRACKLE_MIN) amount = VINYL_CRACKLE_MIN;
+    if (amount > VINYL_CRACKLE_MAX) amount = VINYL_CRACKLE_MAX;
+    vinyl_crackle = amount;
+    dsp_proc_enable(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_VINYL, true);
+    dsp_proc_activate(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_VINYL, true);
 }
 
-void dsp_set_lofi_bitdepth(int bitdepth)
+void dsp_set_vinyl_compression(int amount)
 {
-    if (bitdepth < LOFI_BITDEPTH_MIN) bitdepth = LOFI_BITDEPTH_MIN;
-    if (bitdepth > LOFI_BITDEPTH_MAX) bitdepth = LOFI_BITDEPTH_MAX;
-    lofi_bitdepth = bitdepth;
-    recompute_shift();
-    dsp_proc_enable(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_LOFI, true);
-    dsp_proc_activate(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_LOFI, true);
+    if (amount < VINYL_COMPRESSION_MIN) amount = VINYL_COMPRESSION_MIN;
+    if (amount > VINYL_COMPRESSION_MAX) amount = VINYL_COMPRESSION_MAX;
+    vinyl_compression = amount;
+    dsp_proc_enable(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_VINYL, true);
+    dsp_proc_activate(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_VINYL, true);
 }
 
-void dsp_set_lofi_downsample(int factor)
+void dsp_set_vinyl_flutter(int amount)
 {
-    if (factor < LOFI_DOWNSAMPLE_MIN) factor = LOFI_DOWNSAMPLE_MIN;
-    if (factor > LOFI_DOWNSAMPLE_MAX) factor = LOFI_DOWNSAMPLE_MAX;
-    lofi_downsample = factor;
-    /* Clamp both channels' counters so a shrinking factor can't leave
-     * a channel holding for longer than the new period allows. */
-    for (int ch = 0; ch < 2; ch++)
+    if (amount < VINYL_FLUTTER_MIN) amount = VINYL_FLUTTER_MIN;
+    if (amount > VINYL_FLUTTER_MAX) amount = VINYL_FLUTTER_MAX;
+    vinyl_flutter = amount;
+    dsp_proc_enable(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_VINYL, true);
+    dsp_proc_activate(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_VINYL, true);
+}
+
+void dsp_set_vinyl_mode(int mode)
+{
+    if (mode != VINYL_MODE_VINYL && mode != VINYL_MODE_TAPE)
+        mode = VINYL_MODE_VINYL;
+    vinyl_mode = mode;
+    dsp_proc_enable(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_VINYL, true);
+    dsp_proc_activate(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_VINYL, true);
+}
+
+static void vinyl_flush(void)
+{
+    noise_state = 0x12345678;
+    lp_state[0] = 0;
+    lp_state[1] = 0;
+    pop_amp     = 0;
+    pop_wait    = 0;
+    comp_envelope = 0;
+    memset(flutter_buf, 0, sizeof(flutter_buf));
+    flutter_write_pos = 0;
+    flutter_phase = 0;
+}
+
+/* ---- Flutter/Warble (Knob 3) ---------------------------------------------
+ * Real technique: write incoming audio into a small circular buffer, then
+ * read back from a position that drifts slightly around "now" driven by a
+ * slow LFO. The drift is what produces pitch wobble -- same principle as a
+ * chorus/vibrato effect. Linear interpolation between the two nearest
+ * buffered samples avoids stepped/zippery artifacts from the fractional
+ * read position.
+ *
+ * Mode-specific tuning grounded in real causes:
+ *   Vinyl: slow, regular wobble near 0.556 Hz (33 1/3 RPM once-per-
+ *          rotation warp/off-center wow).
+ *   Tape:  faster (~5 Hz) and less regular -- transport wear/slip rather
+ *          than a rotational lock, so a touch of randomized jitter is
+ *          added to the LFO itself. */
+static int32_t flutter_apply(int ch, int32_t input_sample,
+                              uint32_t lfo_inc, int32_t depth_q8)
+{
+    flutter_buf[ch][flutter_write_pos] = input_sample;
+
+    flutter_phase += lfo_inc;
+
+    /* Top 16 bits of the 32-bit phase = a 0..65535 sawtooth, one full
+     * ramp per LFO cycle. Fold that into a triangle wave. */
+    uint32_t saw = flutter_phase >> 16;
+    uint32_t tri = (saw < 32768) ? (saw * 2) : ((65535 - saw) * 2);
+
+    int32_t jitter_q8 = 0;
+    if (vinyl_mode == VINYL_MODE_TAPE)
     {
-        if (hold_counter[ch] > lofi_downsample)
-            hold_counter[ch] = lofi_downsample;
+        uint32_t x = flutter_jitter_state;
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        flutter_jitter_state = x;
+        jitter_q8 = ((int32_t)(x % 5) - 2) << 8;  /* -2..+2 samples, Q8 */
     }
-    dsp_proc_enable(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_LOFI, true);
-    dsp_proc_activate(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_LOFI, true);
+
+    /* Offset stays in Q8 fixed point through the divide so the
+     * fractional part survives for real interpolation, instead of
+     * being truncated away before we ever get to use it. */
+    int32_t offset_q8 = (int32_t)(((int64_t)tri * depth_q8) / 65536) + jitter_q8;
+
+    int offset_int = offset_q8 >> 8;
+    if (offset_int < 1) offset_int = 1;  /* never read stale wraparound audio */
+    int32_t frac    = offset_q8 & 0xFF;
+
+    int read_pos = flutter_write_pos - offset_int;
+    while (read_pos < 0) read_pos += FLUTTER_BUF_SIZE;
+    int read_pos_next = (read_pos + 1) % FLUTTER_BUF_SIZE;
+
+    int32_t a = flutter_buf[ch][read_pos];
+    int32_t b = flutter_buf[ch][read_pos_next];
+
+    int32_t result = a + (((b - a) * frac) >> 8);
+
+    return result;
 }
-
-/* ---------------------------------------------------------------------
- * Reconstruction / anti-aliasing filter
- *
- * Sample-and-hold downsampling produces a "staircase" signal full of
- * high-frequency images above the new, lower Nyquist limit -- real
- * hardware relied on an analog output filter to smooth this away
- * instead of letting it ring out as harsh digital aliasing. Modeled
- * here as two cascaded one-pole lowpass stages per channel (a cheap
- * ~12dB/oct approximation of a real reconstruction filter), run once
- * per buffer after the sample-and-hold/clip/dither/truncate pass.
- *
- * Cutoff tracks lofi_downsample directly: a bigger hold period means a
- * lower new Nyquist limit, so the filter needs to close down further.
- * At downsample=1 (no downsampling happening) the filter is bypassed
- * entirely -- there's no new aliasing to clean up.
- *
- * Table is indexed by (lofi_downsample - 1); shift 0 means bypass for
- * that stage. Values are starting points -- larger shift = darker/more
- * filtered, tune by ear.
- * ------------------------------------------------------------------- */
-static const int recon_shift_table[16] =
-    { 0, 1, 2, 2, 3, 3, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6 };
-
-static int32_t recon_lp1[2] = {0, 0};
-static int32_t recon_lp2[2] = {0, 0};
-
-static void reconstruction_filter_apply(int32_t **data, int channels, int count)
-{
-    int idx = lofi_downsample - 1;
-    if (idx < 0) idx = 0;
-    if (idx > 15) idx = 15;
-    int shift = recon_shift_table[idx];
-
-    if (shift <= 0)
-        return;  /* bypass -- downsample=1, nothing new to filter out */
-
-    for (int ch = 0; ch < channels; ch++)
-    {
-        for (int i = 0; i < count; i++)
-        {
-            recon_lp1[ch] += (data[ch][i]  - recon_lp1[ch]) >> shift;
-            recon_lp2[ch] += (recon_lp1[ch] - recon_lp2[ch]) >> shift;
-            data[ch][i] = recon_lp2[ch];
-        }
-    }
-}
-
-static void lofi_flush(void)
-{
-    hold_counter[0] = 0;
-    hold_counter[1] = 0;
-    held_sample[0]  = 0;
-    held_sample[1]  = 0;
-    recon_lp1[0] = 0;
-    recon_lp1[1] = 0;
-    recon_lp2[0] = 0;
-    recon_lp2[1] = 0;
-    lofi_noise_state = 0x9E3779B9;
-}
-
-/* Samples-outer / channels-inner, matching vinyl.c's structure, so that
- * both channels advance through the same sample tick together. Each
- * channel keeps its own hold_counter, so L and R sample-and-hold on
- * identical schedules -- no inter-channel drift/smear.
- *
- * Clip -> dither -> truncate all happen only at capture time (once per
- * newly-sampled value), not on repeated held samples -- re-processing a
- * held value on every tick would make it flicker during its hold
- * period, which defeats the point of sample-and-hold. The held branch
- * just replays the already-processed value untouched. */
-static void lofi_process(struct dsp_proc_entry *this, struct dsp_buffer **buf_p)
+static void vinyl_process(struct dsp_proc_entry *this, struct dsp_buffer **buf_p)
 {
     struct dsp_buffer *buf = *buf_p;
     int channels = buf->format.num_channels;
     int count    = buf->remcount;
 
+    if (vinyl_crackle <= 0 && vinyl_compression <= 0 && vinyl_flutter <= 0)
+        return;
+
+    int32_t *data[2];
+    data[0] = buf->p32[0];
+    if (channels > 1)
+        data[1] = buf->p32[1];
+
+    /* --- Rescale compact knob values back to the 0-100 domain the
+     * formulas below were originally written against. This is the ONLY
+     * change from the original file -- everything past this point is
+     * byte-for-byte identical to the version that sounded right, so a
+     * given knob position produces the same effective intensity as the
+     * same proportional position did on the old 0-100 scale. */
+    int intensity = (vinyl_crackle * 100) / VINYL_CRACKLE_MAX;
+
+    int hiss_shift = (38 - current_frac_bits) + 9 - (intensity * 11) / 100;
+    if (hiss_shift < 3)  hiss_shift = 3;
+    if (hiss_shift > 30) hiss_shift = 30;
+
+    int lp_shift = 2 + (intensity * 4) / 100;
+    if (lp_shift < 2) lp_shift = 2;
+    if (lp_shift > 6) lp_shift = 6;
+
+    int pop_knob = intensity;
+    if (pop_knob > 75) pop_knob = 75; /* plateau */
+    int avg_gap_ms = 700 - (6 * pop_knob);
+    if (avg_gap_ms < 40) avg_gap_ms = 40;
+    int avg_gap_samples = (avg_gap_ms * current_frequency) / 1000;
+    if (avg_gap_samples < 32) avg_gap_samples = 32;
+    uint32_t pop_threshold = 65536u / (uint32_t)avg_gap_samples;
+    if (pop_threshold < 1) pop_threshold = 1;
+
+    int pop_shift = hiss_shift - 2 - (pop_knob / 40);
+    if (pop_shift < 1) pop_shift = 1;
+    /* Compression/saturation knob: derives a threshold and a shift-based
+     * squash ratio applied per-sample below. ratio_shift 0 = bypass. */
+    /* Flutter LFO: proper frequency-based increment, tied to the
+     * actual current sample rate, not an arbitrary small integer.
+     * Full 32-bit phase wraps exactly once per LFO cycle. */
+    int flutter_pct = (vinyl_flutter * 100) / VINYL_FLUTTER_MAX;
+    uint32_t flutter_freq_mhz;   /* target frequency, milli-Hz */
+    int flutter_depth_max;
+    if (vinyl_mode == VINYL_MODE_VINYL)
+    {
+        flutter_freq_mhz = 556;  /* 0.556 Hz -- 33 1/3 RPM once-per-rotation wow */
+        flutter_depth_max = 6 + (flutter_pct * 10) / 100;
+    }
+    else
+    {
+        flutter_freq_mhz = 5000; /* ~5 Hz -- tape transport flutter */
+        flutter_depth_max = 3 + (flutter_pct * 6) / 100;
+    }
+    uint32_t flutter_lfo_inc = (uint32_t)(((uint64_t)flutter_freq_mhz << 32) /
+                                           ((uint64_t)current_frequency * 1000));
+    int32_t flutter_depth_q8 = flutter_depth_max << 8;
+    int comp_pct = (vinyl_compression * 100) / VINYL_COMPRESSION_MAX;
+    int comp_ratio_shift = (comp_pct * 4) / 100; /* 0..4 */
+    int comp_thresh_shift = (38 - current_frac_bits) + 3;
+    if (comp_thresh_shift < 2) comp_thresh_shift = 2;
+    int32_t comp_threshold = (int32_t)1 << (32 - comp_thresh_shift > 30 ? 30 : (32 - comp_thresh_shift));
+
     for (int i = 0; i < count; i++)
     {
+        if (vinyl_mode == VINYL_MODE_VINYL)
+        {
+            if (pop_wait > 0)
+            {
+                pop_wait--;
+            }
+            else if ((next_noise() & 0xFFFF) < pop_threshold)
+            {
+                int32_t peak = (int32_t)(next_noise() >> pop_shift);
+                pop_amp  = (next_noise() & 1) ? peak : -peak;
+                pop_wait = avg_gap_samples / 4;
+            }
+        }
+
         for (int ch = 0; ch < channels; ch++)
         {
-            int32_t *data = buf->p32[ch];
-            if (hold_counter[ch] <= 0)
+            int32_t raw = (int32_t)(next_noise() >> hiss_shift);
+            if (next_noise() & 1) raw = -raw;
+
+            lp_state[ch] += (raw - lp_state[ch]) >> lp_shift;
+
+            if (vinyl_flutter > 0)
+                data[ch][i] = flutter_apply(ch, data[ch][i], flutter_lfo_inc, flutter_depth_q8);
+
+            data[ch][i] += lp_state[ch] + pop_amp;
+        }
+
+        flutter_write_pos = (flutter_write_pos + 1) % FLUTTER_BUF_SIZE;
+        if (vinyl_compression > 0)
+        {
+            if (vinyl_mode == VINYL_MODE_VINYL)
             {
-                int32_t s = data[i];
-
-                s = asym_soft_clip(s);
-
-                if (shift_amount > 0)
+                int32_t peak_mag = data[0][i] < 0 ? -data[0][i] : data[0][i];
+                if (channels > 1)
                 {
-                    /* Dither sized to exactly one quantization step,
-                     * zero-mean over [-half step, +half step). */
-                    int32_t step = (int32_t)1 << shift_amount;
-                    int32_t dither = (int32_t)(next_lofi_noise() & (uint32_t)(step - 1)) - (step >> 1);
-                    s += dither;
-                    s = (s >> shift_amount) << shift_amount;
+                    int32_t r_mag = data[1][i] < 0 ? -data[1][i] : data[1][i];
+                    if (r_mag > peak_mag) peak_mag = r_mag;
                 }
+                comp_envelope += (peak_mag - comp_envelope) >> (peak_mag > comp_envelope ? 3 : 9);
 
-                held_sample[ch] = s;
-                data[i] = s;
-                hold_counter[ch] = lofi_downsample - 1;
+                if (comp_envelope > comp_threshold)
+                {
+                    for (int ch = 0; ch < channels; ch++)
+                    {
+                        int32_t s = data[ch][i];
+                        int32_t mag = s < 0 ? -s : s;
+                        if (mag > comp_threshold)
+                        {
+                            int32_t excess = mag - comp_threshold;
+                            int32_t squashed = comp_threshold + (excess >> comp_ratio_shift);
+                            data[ch][i] = (s < 0) ? -squashed : squashed;
+                        }
+                    }
+                }
             }
             else
             {
-                data[i] = held_sample[ch];
-                hold_counter[ch]--;
+                for (int ch = 0; ch < channels; ch++)
+                {
+                    int32_t s = data[ch][i];
+                    int32_t mag = s < 0 ? -s : s;
+                    if (mag > comp_threshold)
+                    {
+                        int32_t excess = mag - comp_threshold;
+                        int32_t squashed = comp_threshold + (excess >> comp_ratio_shift);
+                        data[ch][i] = (s < 0) ? -squashed : squashed;
+                    }
+                }
             }
         }
-    }
 
-    if (channels >= 1)
-    {
-        int32_t *chan_ptrs[2];
-        chan_ptrs[0] = buf->p32[0];
-        if (channels > 1)
-            chan_ptrs[1] = buf->p32[1];
-        reconstruction_filter_apply(chan_ptrs, channels, count);
+        if (pop_amp != 0)
+            pop_amp -= (pop_amp >> 3);
     }
-
     (void)this;
 }
 
-static intptr_t lofi_configure(struct dsp_proc_entry *this,
-                                struct dsp_config *dsp,
-                                unsigned int setting,
-                                intptr_t value)
+static intptr_t vinyl_configure(struct dsp_proc_entry *this,
+                                 struct dsp_config *dsp,
+                                 unsigned int setting,
+                                 intptr_t value)
 {
     intptr_t retval = 0;
     (void)dsp;
+
     switch (setting)
     {
         case DSP_PROC_INIT:
-            this->process = lofi_process;
-            lofi_flush();
+            this->process = vinyl_process;
+            vinyl_flush();
             break;
+
         case DSP_PROC_CLOSE:
-            lofi_flush();
+            vinyl_flush();
             break;
+
         case DSP_FLUSH:
-            lofi_flush();
+            vinyl_flush();
             break;
+
         case DSP_PROC_NEW_FORMAT:
         {
             struct sample_format *format = (struct sample_format *)value;
             current_frac_bits = format->frac_bits;
-            recompute_shift();
-            recompute_clip_thresholds();
+            if (format->frequency > 0)
+                current_frequency = format->frequency;
             retval = PROC_NEW_FORMAT_OK;
             break;
         }
@@ -283,4 +323,4 @@ static intptr_t lofi_configure(struct dsp_proc_entry *this,
     return retval;
 }
 
-DSP_PROC_DB_ENTRY(LOFI, lofi_configure);
+DSP_PROC_DB_ENTRY(VINYL, vinyl_configure);
