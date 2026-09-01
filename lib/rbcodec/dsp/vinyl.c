@@ -36,64 +36,10 @@ static int     flutter_write_pos = 0;
 static uint32_t flutter_phase = 0;      /* LFO phase accumulator */
 static uint32_t flutter_jitter_state = 0xA5A5A5A5;
 
-/* ---------------------------------------------------------------------
- * Lookup tables, one entry per quick-menu step (index = knob - 1).
- * Hand-authored rather than derived by /100 division so every step is
- * guaranteed to change the sound -- no repeated/dead positions. Values
- * are starting points tuned by ear against S950/MPC60-style character;
- * nudge freely once you've listened.
- * ------------------------------------------------------------------- */
-
-/* Crackle (1-16): three sub-effects driven off one knob. */
-
-/* Subtracted from the frac_bits-derived base hiss shift -- larger value
- * here = louder hiss. Extended to 0-15 (was implicitly capped at 11). */
-static const int crackle_hiss_term[16] =
-    { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
-
-/* Added to the base lowpass shift of 2 -- larger value = darker/duller
- * hiss color. Extended to 0-7 (was capped at 4). */
-static const int crackle_lp_term[16] =
-    { 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7 };
-
-/* Average gap between pops, in ms. Directly authored instead of run
- * through a formula that plateaued at 75/100 -- top step is now
- * genuinely dense crackle instead of the old near-static ~2-state
- * range. */
-static const int crackle_pop_gap_ms[16] =
-    { 700, 600, 500, 420, 350, 290, 240, 200,
-      160, 130, 100,  75,  55,  40,  25,  15 };
-
-/* Subtracted (on top of the existing -2) from hiss_shift to get pop
- * amplitude -- larger value = louder pops at high settings. */
-static const int crackle_pop_extra_term[16] =
-    { 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8 };
-
-/* Compression (1-10): ratio shift and how far the threshold drops as
- * the knob rises. Ceiling widened from the old fixed 0-4 to 0-8 so max
- * setting is a genuinely aggressive, obviously-pumping squash rather
- * than topping out at mild glue. */
-static const int comp_ratio_table[10] =
-    { 0, 1, 1, 2, 2, 3, 4, 5, 6, 8 };
-
-/* Added to comp_thresh_shift -- raises the shift, which lowers the
- * effective threshold, so higher settings catch more of the signal
- * instead of the threshold sitting static regardless of knob position. */
-static const int comp_thresh_extra_table[10] =
-    { 0, 0, 0, 1, 1, 1, 2, 2, 3, 3 };
-
-/* Flutter (1-10): peak depth per mode, separate tables so tape gets its
- * own full 10-step spread instead of being squeezed by a shared
- * multiplier into fewer real states than vinyl mode. */
-static const int flutter_depth_vinyl[10] =
-    {  4,  6,  8, 10, 12, 14, 17, 20, 24, 28 };
-static const int flutter_depth_tape[10] =
-    {  2,  3,  4,  6,  8, 10, 13, 16, 20, 24 };
-
 void dsp_set_vinyl_crackle(int amount)
 {
-    if (amount < VINYL_CRACKLE_MIN) amount = VINYL_CRACKLE_MIN;
-    if (amount > VINYL_CRACKLE_MAX) amount = VINYL_CRACKLE_MAX;
+    if (amount < VINYL_KNOB_MIN) amount = VINYL_KNOB_MIN;
+    if (amount > VINYL_KNOB_MAX) amount = VINYL_KNOB_MAX;
     vinyl_crackle = amount;
     dsp_proc_enable(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_VINYL, true);
     dsp_proc_activate(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_VINYL, true);
@@ -101,8 +47,8 @@ void dsp_set_vinyl_crackle(int amount)
 
 void dsp_set_vinyl_compression(int amount)
 {
-    if (amount < VINYL_COMPRESSION_MIN) amount = VINYL_COMPRESSION_MIN;
-    if (amount > VINYL_COMPRESSION_MAX) amount = VINYL_COMPRESSION_MAX;
+    if (amount < VINYL_KNOB_MIN) amount = VINYL_KNOB_MIN;
+    if (amount > VINYL_KNOB_MAX) amount = VINYL_KNOB_MAX;
     vinyl_compression = amount;
     dsp_proc_enable(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_VINYL, true);
     dsp_proc_activate(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_VINYL, true);
@@ -110,8 +56,8 @@ void dsp_set_vinyl_compression(int amount)
 
 void dsp_set_vinyl_flutter(int amount)
 {
-    if (amount < VINYL_FLUTTER_MIN) amount = VINYL_FLUTTER_MIN;
-    if (amount > VINYL_FLUTTER_MAX) amount = VINYL_FLUTTER_MAX;
+    if (amount < VINYL_KNOB_MIN) amount = VINYL_KNOB_MIN;
+    if (amount > VINYL_KNOB_MAX) amount = VINYL_KNOB_MAX;
     vinyl_flutter = amount;
     dsp_proc_enable(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_VINYL, true);
     dsp_proc_activate(dsp_get_config(CODEC_IDX_AUDIO), DSP_PROC_VINYL, true);
@@ -208,78 +154,55 @@ static void vinyl_process(struct dsp_proc_entry *this, struct dsp_buffer **buf_p
     if (channels > 1)
         data[1] = buf->p32[1];
 
-    int hiss_shift, lp_shift, pop_shift;
-    int avg_gap_samples = 0;
-    uint32_t pop_threshold = 0;
+    int intensity = vinyl_crackle;
 
-    if (vinyl_crackle > 0)
-    {
-        int idx = vinyl_crackle - 1;  /* 0-15 */
+    int hiss_shift = (38 - current_frac_bits) + 9 - (intensity * 11) / 100;
+    if (hiss_shift < 3)  hiss_shift = 3;
+    if (hiss_shift > 30) hiss_shift = 30;
 
-        int base_hiss = (38 - current_frac_bits) + 9;
-        hiss_shift = base_hiss - crackle_hiss_term[idx];
-        if (hiss_shift < 3)  hiss_shift = 3;
-        if (hiss_shift > 30) hiss_shift = 30;
+    int lp_shift = 2 + (intensity * 4) / 100;
+    if (lp_shift < 2) lp_shift = 2;
+    if (lp_shift > 6) lp_shift = 6;
 
-        lp_shift = 2 + crackle_lp_term[idx];
-        if (lp_shift < 2) lp_shift = 2;
-        if (lp_shift > 9) lp_shift = 9;
+    int pop_knob = vinyl_crackle;
+    if (pop_knob > 75) pop_knob = 75; /* plateau */
+    int avg_gap_ms = 700 - (6 * pop_knob);
+    if (avg_gap_ms < 40) avg_gap_ms = 40;
+    int avg_gap_samples = (avg_gap_ms * current_frequency) / 1000;
+    if (avg_gap_samples < 32) avg_gap_samples = 32;
+    uint32_t pop_threshold = 65536u / (uint32_t)avg_gap_samples;
+    if (pop_threshold < 1) pop_threshold = 1;
 
-        int avg_gap_ms = crackle_pop_gap_ms[idx];
-        avg_gap_samples = (avg_gap_ms * current_frequency) / 1000;
-        if (avg_gap_samples < 32) avg_gap_samples = 32;
-        pop_threshold = 65536u / (uint32_t)avg_gap_samples;
-        if (pop_threshold < 1) pop_threshold = 1;
-
-        pop_shift = hiss_shift - 2 - crackle_pop_extra_term[idx];
-        if (pop_shift < 1) pop_shift = 1;
-    }
-    else
-    {
-        /* Values are unused (loop bodies below are gated on
-         * vinyl_crackle > 0) but keep them sane for safety. */
-        hiss_shift = 30;
-        lp_shift   = 9;
-        pop_shift  = 1;
-    }
-
+    int pop_shift = hiss_shift - 2 - (pop_knob / 40);
+    if (pop_shift < 1) pop_shift = 1;
+    /* Compression/saturation knob: derives a threshold and a shift-based
+     * squash ratio applied per-sample below. ratio_shift 0 = bypass. */
     /* Flutter LFO: proper frequency-based increment, tied to the
      * actual current sample rate, not an arbitrary small integer.
      * Full 32-bit phase wraps exactly once per LFO cycle. */
     uint32_t flutter_freq_mhz;   /* target frequency, milli-Hz */
-    int flutter_depth_max = 0;
+    int flutter_depth_max;
     if (vinyl_mode == VINYL_MODE_VINYL)
     {
         flutter_freq_mhz = 556;  /* 0.556 Hz -- 33 1/3 RPM once-per-rotation wow */
-        if (vinyl_flutter > 0)
-            flutter_depth_max = flutter_depth_vinyl[vinyl_flutter - 1];
+        flutter_depth_max = 6 + (vinyl_flutter * 10) / 100;
     }
     else
     {
         flutter_freq_mhz = 5000; /* ~5 Hz -- tape transport flutter */
-        if (vinyl_flutter > 0)
-            flutter_depth_max = flutter_depth_tape[vinyl_flutter - 1];
+        flutter_depth_max = 3 + (vinyl_flutter * 6) / 100;
     }
     uint32_t flutter_lfo_inc = (uint32_t)(((uint64_t)flutter_freq_mhz << 32) /
                                            ((uint64_t)current_frequency * 1000));
     int32_t flutter_depth_q8 = flutter_depth_max << 8;
-
-    int comp_ratio_shift = 0;
-    int32_t comp_threshold = 0;
-    if (vinyl_compression > 0)
-    {
-        int idx = vinyl_compression - 1;  /* 0-9 */
-        comp_ratio_shift = comp_ratio_table[idx];
-
-        int comp_thresh_shift = (38 - current_frac_bits) + 3 + comp_thresh_extra_table[idx];
-        if (comp_thresh_shift < 2)  comp_thresh_shift = 2;
-        if (comp_thresh_shift > 30) comp_thresh_shift = 30;
-        comp_threshold = (int32_t)1 << (32 - comp_thresh_shift);
-    }
+    int comp_ratio_shift = (vinyl_compression * 4) / 100; /* 0..4 */
+    int comp_thresh_shift = (38 - current_frac_bits) + 3;
+    if (comp_thresh_shift < 2) comp_thresh_shift = 2;
+    int32_t comp_threshold = (int32_t)1 << (32 - comp_thresh_shift > 30 ? 30 : (32 - comp_thresh_shift));
 
     for (int i = 0; i < count; i++)
     {
-        if (vinyl_crackle > 0 && vinyl_mode == VINYL_MODE_VINYL)
+        if (vinyl_mode == VINYL_MODE_VINYL)
         {
             if (pop_wait > 0)
             {
@@ -295,19 +218,15 @@ static void vinyl_process(struct dsp_proc_entry *this, struct dsp_buffer **buf_p
 
         for (int ch = 0; ch < channels; ch++)
         {
-            if (vinyl_crackle > 0)
-            {
-                int32_t raw = (int32_t)(next_noise() >> hiss_shift);
-                if (next_noise() & 1) raw = -raw;
+            int32_t raw = (int32_t)(next_noise() >> hiss_shift);
+            if (next_noise() & 1) raw = -raw;
 
-                lp_state[ch] += (raw - lp_state[ch]) >> lp_shift;
-            }
+            lp_state[ch] += (raw - lp_state[ch]) >> lp_shift;
 
             if (vinyl_flutter > 0)
                 data[ch][i] = flutter_apply(ch, data[ch][i], flutter_lfo_inc, flutter_depth_q8);
 
-            if (vinyl_crackle > 0)
-                data[ch][i] += lp_state[ch] + pop_amp;
+            data[ch][i] += lp_state[ch] + pop_amp;
         }
 
         flutter_write_pos = (flutter_write_pos + 1) % FLUTTER_BUF_SIZE;
